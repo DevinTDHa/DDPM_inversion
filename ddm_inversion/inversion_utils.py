@@ -194,10 +194,10 @@ def inversion_forward_process(
             noise_pred = out.sample + cfg_scale * (cond_out.sample - out.sample)
         else:
             noise_pred = out.sample
+
         if eta_is_zero:
             # 2. compute more noisy image and set x_t -> x_t+1
             xt = forward_step(model, noise_pred, t, xt)
-
         else:
             # xtm1 =  xts[idx+1][None]
             xtm1 = xts[idx][None]
@@ -248,6 +248,7 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
         - model.scheduler.config.num_train_timesteps
         // model.scheduler.num_inference_steps
     )
+
     # 2. compute alphas, betas
     alpha_prod_t = model.scheduler.alphas_cumprod[timestep]
     alpha_prod_t_prev = (
@@ -256,11 +257,13 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
         else model.scheduler.final_alpha_cumprod
     )
     beta_prod_t = 1 - alpha_prod_t
+
     # 3. compute predicted original sample from predicted noise also called
     # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
     pred_original_sample = (
         sample - beta_prod_t ** (0.5) * model_output
     ) / alpha_prod_t ** (0.5)
+
     # 5. compute variance: "sigma_t(η)" -> see formula (16)
     # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
     # variance = self.scheduler._get_variance(timestep, prev_timestep)
@@ -268,16 +271,19 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
     std_dev_t = eta * variance ** (0.5)
     # Take care of asymetric reverse process (asyrp)
     model_output_direction = model_output
+
     # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
     # pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * model_output_direction
     pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (
         0.5
     ) * model_output_direction
+
     # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
     prev_sample = (
         alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
     )
-    # 8. Add noice if eta > 0
+
+    # 8. Add noise if eta > 0
     if eta > 0:
         if variance_noise is None:
             variance_noise = torch.randn(model_output.shape, device=model.device)
@@ -329,7 +335,7 @@ def inversion_reverse_process(
                 xt, timestep=t, encoder_hidden_states=uncond_embedding
             )
 
-            ## Conditional embedding
+        ## Conditional embedding
         if prompts:
             with torch.no_grad():
                 cond_out = model.unet.forward(
