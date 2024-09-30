@@ -123,3 +123,21 @@ def dataset_from_yaml(yaml_location):
         data_loaded = yaml.safe_load(stream)
 
     return data_loaded
+
+
+def project_x_to_normal_space(x):
+    return x * 0.5 + 0.5
+
+
+def save_intermediate_img(path, tensor_img):
+    # Convert tensor to PIL image
+    if len(tensor_img.shape) == 4:
+        tensor_img = tensor_img[0]  # Assume only one image
+
+    tensor_img = project_x_to_normal_space(tensor_img)
+
+    to_pil = T.ToPILImage()
+    pil_img = to_pil(tensor_img.cpu().detach().clamp(0, 1))
+
+    # Save the image
+    pil_img.save(path)

@@ -1,10 +1,16 @@
+from typing import Optional
 import torch
 import os
 from tqdm import tqdm
+from ddm_inversion.utils import (
+    pil_to_tensor,
+    save_intermediate_img,
+    project_x_to_normal_space,
+)
+from prompt_to_prompt.ptp_classes import AttentionStore
 
 
 def load_real_image(folder="data/", img_name=None, idx=0, img_size=512, device="cuda"):
-    from ddm_inversion.utils import pil_to_tensor
     from PIL import Image
     from glob import glob
 
@@ -140,7 +146,7 @@ def get_variance(model, timestep):  # , prev_timestep):
 def inversion_forward_process(
     model,
     x0,
-    etas=None,
+    etas=1,
     prog_bar=False,
     prompt="",
     cfg_scale=3.5,
@@ -242,6 +248,18 @@ def inversion_forward_process(
 
 
 def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=None):
+    """
+    Perform a reverse step in the denoising diffusion probabilistic model (DDPM) process.
+    Args:
+        model (nn.Module): The model used for the DDPM process.
+        model_output (torch.Tensor): The output from the model at the current timestep.
+        timestep (int): The current timestep in the diffusion process.
+        sample (torch.Tensor): The current sample in the diffusion process.
+        eta (float, optional): The scaling factor η for the variance noise. Default is 0.
+        variance_noise (torch.Tensor, optional): The noise to be added to the sample. If None, random noise is generated. Default is None.
+    Returns:
+        torch.Tensor: The sample at the previous timestep in the diffusion process.
+    """
     # 1. get previous step value (=t-1)
     prev_timestep = (
         timestep
@@ -259,7 +277,7 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
     beta_prod_t = 1 - alpha_prod_t
 
     # 3. compute predicted original sample from predicted noise also called
-    # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+    # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf (DDIM)
     pred_original_sample = (
         sample - beta_prod_t ** (0.5) * model_output
     ) / alpha_prod_t ** (0.5)
@@ -272,7 +290,7 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
     # Take care of asymetric reverse process (asyrp)
     model_output_direction = model_output
 
-    # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+    # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf (DDIM)
     # pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * model_output_direction
     pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (
         0.5
@@ -283,7 +301,7 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
         alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
     )
 
-    # 8. Add noise if eta > 0
+    # 8. Add noise if eta > 0, DHA: DDPM Case if eta == 1
     if eta > 0:
         if variance_noise is None:
             variance_noise = torch.randn(model_output.shape, device=model.device)
@@ -296,7 +314,7 @@ def reverse_step(model, model_output, timestep, sample, eta=0, variance_noise=No
 def inversion_reverse_process(
     model,
     xT,
-    etas=0,
+    etas=1,
     prompts="",
     cfg_scales=None,
     prog_bar=False,
@@ -304,6 +322,22 @@ def inversion_reverse_process(
     controller=None,
     asyrp=False,
 ):
+    """
+    Perform the reverse process of inversion using a given model.
+
+    Args:
+        model (torch.nn.Module): The model to use for the reverse process.
+        xT (torch.Tensor): The initial tensor to start the reverse process.
+        etas (float): The scaling factor η for the variance noise. Default is 1.
+        prompts (str or list of str, optional): Text prompts for conditional generation. Default is an empty string.
+        cfg_scales (list of floats, optional): Classifier-free guidance scales. Default is None.
+        prog_bar (bool, optional): Whether to display a progress bar. Default is False.
+        zs (torch.Tensor, optional): Latent variables for each timestep. Default is None.
+        controller (object, optional): An optional controller object with a step_callback method. Default is None.
+        asyrp (bool, optional): An optional flag for asynchronous reverse process. Default is False.
+    Returns:
+        tuple: A tuple containing the final tensor after the reverse process and the latent variables (zs).
+    """
     batch_size = len(prompts)
 
     cfg_scales_tensor = torch.Tensor(cfg_scales).view(-1, 1, 1, 1).to(model.device)
@@ -354,5 +388,128 @@ def inversion_reverse_process(
         # 2. compute less noisy image and set x_t -> x_t-1
         xt = reverse_step(model, noise_pred, t, xt, eta=etas[idx], variance_noise=z)
         if controller is not None:
-            xt = controller.step_callback(xt)
+            xt = controller.step_callback(xt)  # DHA: By default just identity?
     return xt, zs
+
+
+def inversion_reverse_process_grad_guided(
+    model,
+    x0: torch.Tensor,
+    xT: torch.Tensor,
+    predictor: torch.nn.Module,
+    zs: torch.Tensor,
+    etas: int = 0,
+    cfg_scales=None,
+    controller: Optional[AttentionStore] = None,
+):
+    assert predictor, "A predictor module is required for grad guided inversion"
+
+    batch_size = 1
+
+    # cfg_scales_tensor = torch.Tensor(cfg_scales).view(-1, 1, 1, 1).to(model.device)
+    # text_embeddings = None  # no text embeddings needed
+
+    # 1. Create Unconditional embeddings
+    uncond_embedding = encode_text(model, [""] * batch_size).requires_grad_(False)
+
+    if etas is None:
+        etas = 0
+    if type(etas) in [int, float]:
+        etas = [etas] * model.scheduler.num_inference_steps
+    assert len(etas) == model.scheduler.num_inference_steps
+    timesteps = model.scheduler.timesteps.to(model.device)
+
+    def init_xt():
+        return xT.clone().expand(batch_size, -1, -1, -1)
+
+    # DHA: might need to adjust this if we don't have enough memory to store all grads
+    xt = init_xt()
+    # 2. Get required timesteps
+    t_to_idx = {int(v): k for k, v in enumerate(timesteps[-zs.shape[0] :])}
+
+    grads_for = "zs"
+    grad_params = []
+    if grads_for == "xt":
+        # Enable Grads for xt
+        xt.requires_grad_()
+        grad_params.append(xt)
+    elif grads_for == "zs":
+        # Enable Grads for z
+        # DHA: maybe do this iteratively in the loop? keep denoising and adjusting zs until the predictor value changes?
+        zs_orig = zs.detach().clone()
+        zs.requires_grad_()  # DHA: where do we need to start to collect grads?
+        grad_params.append(zs)
+    else:
+        raise ValueError("Invalid grads_for value")
+
+    optimizer = torch.optim.Adam(grad_params, lr=0.005, maximize=True)
+
+    pred = predictor(
+        project_x_to_normal_space(x0)
+    )  # DHA: x0 value range is -1 to 1 due to diffusion model
+
+    print("Initial predictor value before denoising: ", pred.item())
+    reg_n = 0
+    reg_n_max = 10
+    threshold = 0.9  # TODO
+    while pred < threshold and reg_n < reg_n_max:
+
+        intermediate_folder = f"imgs/intermediate/reg_{reg_n}/" + str(pred.item())
+        os.makedirs(intermediate_folder, exist_ok=True)  # DHA: For intermediate images
+
+        # 3. Start reverse process loop
+        for t in tqdm(timesteps[-zs.shape[0] :], desc=f"Regression run {reg_n}"):
+            idx = (
+                model.scheduler.num_inference_steps
+                - t_to_idx[int(t)]
+                - (model.scheduler.num_inference_steps - zs.shape[0] + 1)
+            )
+
+            # 3.1 Predict noise
+            with torch.no_grad():
+                uncond_out = model.unet.forward(
+                    xt, timestep=t, encoder_hidden_states=uncond_embedding
+                )
+
+            # ## Conditional embedding
+            # if prompts:
+            #     with torch.no_grad():
+            #         cond_out = model.unet.forward(
+            #             xt, timestep=t, encoder_hidden_states=text_embeddings
+            #         )
+
+            z = zs[idx]
+            z = z.expand(batch_size, -1, -1, -1)
+
+            # if prompts:
+            #     ## classifier free guidance
+            #     noise_pred = uncond_out.sample + cfg_scales_tensor * (
+            #         cond_out.sample - uncond_out.sample
+            #     )
+            # else:
+
+            noise_pred = uncond_out.sample
+            # 3.2 compute less noisy image and set x_t -> x_t-1
+            xt = reverse_step(model, noise_pred, t, xt, eta=etas[idx], variance_noise=z)
+            save_intermediate_img(intermediate_folder + f"t_{t.item():04d}.png", xt)
+            if controller is not None:
+                xt = controller.step_callback(xt)  # DHA: By default just identity?
+
+        xt.requires_grad_()
+        # TODO: Decode for final image actually
+        end_pred: torch.Tensor = predictor(project_x_to_normal_space(xt))
+        print("Predictor value after denoising: ", end_pred.item())
+        end_pred.backward(inputs=grad_params)
+
+        # Regression Gradients
+        # end_pred.backward()  # DHA: somehow use this instead?
+        print(f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item())
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # Reset xt
+        xt = init_xt()
+        reg_n += 1
+
+    # Edit
+    return xt, z

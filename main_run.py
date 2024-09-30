@@ -2,6 +2,7 @@ import argparse
 from diffusers import StableDiffusionPipeline
 from diffusers import DDIMScheduler
 import os
+from ddm_inversion.models import BaselineColorPredictor
 from prompt_to_prompt.ptp_classes import (
     AttentionStore,
     AttentionReplace,
@@ -17,6 +18,7 @@ from prompt_to_prompt.ptp_utils import (
 from ddm_inversion.inversion_utils import (
     inversion_forward_process,
     inversion_reverse_process,
+    inversion_reverse_process_grad_guided,
 )
 from ddm_inversion.utils import image_grid, dataset_from_yaml
 
@@ -33,7 +35,7 @@ if __name__ == "__main__":
     parser.add_argument("--cfg_tar", type=float, default=15)
     parser.add_argument("--num_diffusion_steps", type=int, default=100)
     parser.add_argument("--dataset_yaml", default="test.yaml")
-    parser.add_argument("--eta", type=float, default=1)
+    parser.add_argument("--eta", type=float, default=1, help="eta to move between DDPM and DDIM")
     parser.add_argument(
         "--mode", default="our_inv", help="modes: our_inv,p2pinv,p2pddim,ddim"
     )
@@ -48,6 +50,7 @@ if __name__ == "__main__":
     # load diffusion model
     model_id = "CompVis/stable-diffusion-v1-4"
     # model_id = "stable_diff_local" # load local save of model (for internet problems)
+    # model_id = "/home/ducha/Workspace/runs/peal_runs/basf/SD_finetune"
 
     device = f"cuda:{args.device_num}"
 
@@ -66,20 +69,21 @@ if __name__ == "__main__":
     for i in range(len(full_data)):
         current_image_data = full_data[i]
         image_path = current_image_data["init_img"]
-        image_path = "." + image_path
+        # image_path = "." + image_path
         image_folder = image_path.split("/")[1]  # after '.'
         prompt_src = current_image_data.get("source_prompt", "")  # default empty string
         prompt_tar_list = current_image_data["target_prompts"]
 
-        if args.mode == "p2pddim" or args.mode == "ddim":
-            scheduler = DDIMScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                clip_sample=False,
-                set_alpha_to_one=False,
-            )
-            ldm_stable.scheduler = scheduler
+        if args.mode == "p2pddim" or args.mode == "ddim":  # DHA: other methods
+            # scheduler = DDIMScheduler(
+            #     beta_start=0.00085,
+            #     beta_end=0.012,
+            #     beta_schedule="scaled_linear",
+            #     clip_sample=False,
+            #     set_alpha_to_one=False,
+            # )
+            # ldm_stable.scheduler = scheduler
+            pass
         else:
             ldm_stable.scheduler = DDIMScheduler.from_config(
                 model_id, subfolder="scheduler"
@@ -98,7 +102,7 @@ if __name__ == "__main__":
         # find Zs and wts - forward process
         if args.mode == "p2pddim" or args.mode == "ddim":
             wT = ddim_inversion(ldm_stable, w0, prompt_src, cfg_scale_src)
-        else:
+        else:  # DHA: DDPM inversion, return values: xt (current x), zs (noise maps), xts (all x states)
             wt, zs, wts = inversion_forward_process(
                 ldm_stable,
                 w0,
@@ -109,7 +113,7 @@ if __name__ == "__main__":
                 num_inference_steps=args.num_diffusion_steps,
             )
 
-        # iterate over decoder prompts
+        # iterate over decoder prompts DHA: Maybe inject predictor gradients here? However, could be very expensive for VRAM
         for k in range(len(prompt_tar_list)):
             prompt_tar = prompt_tar_list[k]
             save_path = os.path.join(
@@ -120,6 +124,7 @@ if __name__ == "__main__":
                 "dec_" + prompt_tar.replace(" ", "_"),
             )
             os.makedirs(save_path, exist_ok=True)
+            print("Created results folder ", save_path)
 
             # Check if number of words in encoder and decoder text are equal
             src_tar_len_eq = len(prompt_src.split(" ")) == len(prompt_tar.split(" "))
@@ -140,81 +145,95 @@ if __name__ == "__main__":
                             zs=zs[: (args.num_diffusion_steps - skip)],
                             controller=controller,
                         )
-
-                    elif args.mode == "p2pinv":
-                        # inversion with attention replace
-                        cfg_scale_list = [cfg_scale_src, cfg_scale_tar]
-                        prompts = [prompt_src, prompt_tar]
-                        if src_tar_len_eq:
-                            controller = AttentionReplace(
-                                prompts,
-                                args.num_diffusion_steps,
-                                cross_replace_steps=args.xa,
-                                self_replace_steps=args.sa,
-                                model=ldm_stable,
-                            )
-                        else:
-                            # Should use Refine for target prompts with different number of tokens
-                            controller = AttentionRefine(
-                                prompts,
-                                args.num_diffusion_steps,
-                                cross_replace_steps=args.xa,
-                                self_replace_steps=args.sa,
-                                model=ldm_stable,
-                            )
-
+                    elif args.mode == "regression":
+                        controller = AttentionStore()
                         register_attention_control(ldm_stable, controller)
-                        w0, _ = inversion_reverse_process(
+                        predictor = BaselineColorPredictor()
+                        w0, _ = inversion_reverse_process_grad_guided(
                             ldm_stable,
+                            x0=x0,
                             xT=wts[args.num_diffusion_steps - skip],
-                            etas=eta,
-                            prompts=prompts,
-                            cfg_scales=cfg_scale_list,
-                            prog_bar=True,
+                            predictor=predictor,
                             zs=zs[: (args.num_diffusion_steps - skip)],
+                            etas=eta,
+                            cfg_scales=[cfg_scale_tar],
                             controller=controller,
                         )
-                        w0 = w0[1].unsqueeze(0)
 
-                    elif args.mode == "p2pddim" or args.mode == "ddim":
-                        # only z=0
-                        if skip != 0:
-                            continue
-                        prompts = [prompt_src, prompt_tar]
-                        if args.mode == "p2pddim":
-                            if src_tar_len_eq:
-                                controller = AttentionReplace(
-                                    prompts,
-                                    args.num_diffusion_steps,
-                                    cross_replace_steps=0.8,
-                                    self_replace_steps=0.4,
-                                    model=ldm_stable,
-                                )
-                            # Should use Refine for target prompts with different number of tokens
-                            else:
-                                controller = AttentionRefine(
-                                    prompts,
-                                    args.num_diffusion_steps,
-                                    cross_replace_steps=0.8,
-                                    self_replace_steps=0.4,
-                                    model=ldm_stable,
-                                )
-                        else:
-                            controller = EmptyControl()
+                    # elif args.mode == "p2pinv":
+                    #     # inversion with attention replace
+                    #     cfg_scale_list = [cfg_scale_src, cfg_scale_tar]
+                    #     prompts = [prompt_src, prompt_tar]
+                    #     if src_tar_len_eq:
+                    #         controller = AttentionReplace(
+                    #             prompts,
+                    #             args.num_diffusion_steps,
+                    #             cross_replace_steps=args.xa,
+                    #             self_replace_steps=args.sa,
+                    #             model=ldm_stable,
+                    #         )
+                    #     else:
+                    #         # Should use Refine for target prompts with different number of tokens
+                    #         controller = AttentionRefine(
+                    #             prompts,
+                    #             args.num_diffusion_steps,
+                    #             cross_replace_steps=args.xa,
+                    #             self_replace_steps=args.sa,
+                    #             model=ldm_stable,
+                    #         )
 
-                        register_attention_control(ldm_stable, controller)
-                        # perform ddim inversion
-                        cfg_scale_list = [cfg_scale_src, cfg_scale_tar]
-                        w0, latent = text2image_ldm_stable(
-                            ldm_stable,
-                            prompts,
-                            controller,
-                            args.num_diffusion_steps,
-                            cfg_scale_list,
-                            None,
-                            wT,
-                        )
-                        w0 = w0[1:2]
+                    #     register_attention_control(ldm_stable, controller)
+                    #     w0, _ = inversion_reverse_process(
+                    #         ldm_stable,
+                    #         xT=wts[args.num_diffusion_steps - skip],
+                    #         etas=eta,
+                    #         prompts=prompts,
+                    #         cfg_scales=cfg_scale_list,
+                    #         prog_bar=True,
+                    #         zs=zs[: (args.num_diffusion_steps - skip)],
+                    #         controller=controller,
+                    #     )
+                    #     w0 = w0[1].unsqueeze(0)
+
+                    # elif args.mode == "p2pddim" or args.mode == "ddim":
+                    #     # only z=0
+                    #     if skip != 0:
+                    #         continue
+                    #     prompts = [prompt_src, prompt_tar]
+                    #     if args.mode == "p2pddim":
+                    #         if src_tar_len_eq:
+                    #             controller = AttentionReplace(
+                    #                 prompts,
+                    #                 args.num_diffusion_steps,
+                    #                 cross_replace_steps=0.8,
+                    #                 self_replace_steps=0.4,
+                    #                 model=ldm_stable,
+                    #             )
+                    #         # Should use Refine for target prompts with different number of tokens
+                    #         else:
+                    #             controller = AttentionRefine(
+                    #                 prompts,
+                    #                 args.num_diffusion_steps,
+                    #                 cross_replace_steps=0.8,
+                    #                 self_replace_steps=0.4,
+                    #                 model=ldm_stable,
+                    #             )
+                    #     else:
+                    #         controller = EmptyControl()
+
+                    #     register_attention_control(ldm_stable, controller)
+                    #     # perform ddim inversion
+                    #     cfg_scale_list = [cfg_scale_src, cfg_scale_tar]
+                    #     w0, latent = text2image_ldm_stable(
+                    #         ldm_stable,
+                    #         prompts,
+                    #         controller,
+                    #         args.num_diffusion_steps,
+                    #         cfg_scale_list,
+                    #         None,
+                    #         wT,
+                    #     )
+                    #     w0 = w0[1:2]
                     else:
                         raise NotImplementedError
 
@@ -235,4 +254,5 @@ if __name__ == "__main__":
                     )
 
                     save_full_path = os.path.join(save_path, image_name_png)
+                    print("Saving image to: ", save_full_path)
                     img.save(save_full_path)

@@ -216,6 +216,20 @@ def text2image_ldm_stable(
 
 
 def register_attention_control(model, controller):
+    """
+    Registers a custom attention control mechanism to a given model.
+    This function modifies the forward pass of CrossAttention layers within the model's UNet 
+    architecture to incorporate a custom attention controller. The controller can manipulate 
+    the attention weights during the forward pass.
+    Args:
+        model (torch.nn.Module): The model containing the UNet architecture with CrossAttention layers.
+        controller (callable): A callable that takes attention weights, a boolean indicating if 
+                               it's a cross-attention, and a string indicating the place in the UNet 
+                               ('down', 'up', 'mid'). It returns the modified attention weights. 
+                               If None, a DummyController is used which does not modify the attention weights.
+    Returns:
+        None
+    """
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
         if type(to_out) is torch.nn.modules.container.ModuleList:

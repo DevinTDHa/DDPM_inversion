@@ -99,6 +99,32 @@ class EmptyControl(AttentionControl):
 
 
 class AttentionStore(AttentionControl):
+    """
+    AttentionStore is a class that extends AttentionControl to manage and store attention weights
+    during the forward pass of a neural network. It provides methods to accumulate and average
+    attention weights across multiple steps.
+
+    Methods
+    -------
+    get_empty_store():
+        Returns an empty dictionary to store attention weights for different layers and types.
+
+    forward(attn, is_cross: bool, place_in_unet: str):
+        Stores the attention weights in the appropriate category based on whether it is cross-attention
+        or self-attention and the position in the U-Net architecture.
+
+    between_steps():
+        Accumulates the attention weights from the current step to the overall attention store.
+
+    get_average_attention():
+        Computes the average attention weights by dividing the accumulated weights by the number of steps.
+
+    reset():
+        Resets the attention store and step store to their initial empty states.
+
+    __init__():
+        Initializes the AttentionStore with empty dictionaries for step store and attention store.
+    """
     @staticmethod
     def get_empty_store():
         return {
