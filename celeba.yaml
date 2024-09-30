@@ -1,4 +1,4 @@
-- init_img: ./init/celeba_hq_samples/154.jpg
+- init_img: ./init/154.jpg
   source_prompt: a portrait photo of a happy celebrity
   target_prompts:
     - a portrait photo of a sad celebrity
