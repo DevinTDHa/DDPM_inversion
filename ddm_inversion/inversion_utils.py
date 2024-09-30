@@ -9,6 +9,7 @@ from ddm_inversion.utils import (
     project_x_to_normal_space,
 )
 from prompt_to_prompt.ptp_classes import AttentionStore
+import pdb
 
 
 def load_real_image(folder="data/", img_name=None, idx=0, img_size=512, device="cuda"):
@@ -445,18 +446,18 @@ def inversion_reverse_process_grad_guided(
 
     optimizer = torch.optim.Adam(grad_params, lr=0.005, maximize=True)
 
-    pred = predictor(
-        decode_latents(model, xt)
-    )
+    xt_decoded = decode_latents(model, xt)
+    pred = predictor(project_x_to_normal_space(xt_decoded))
 
     print("Initial predictor value before denoising: ", pred.item())
+    intermediate_folder = os.path.join(f"imgs/intermediate/reg_", str(pred.item()))
+    os.makedirs(intermediate_folder, exist_ok=True)  # DHA: For intermediate images
+
     reg_n = 0
     reg_n_max = 10
     threshold = 0.9  # TODO
-    while pred < threshold and reg_n < reg_n_max:
 
-        intermediate_folder = f"imgs/intermediate/reg_{reg_n}/" + str(pred.item())
-        os.makedirs(intermediate_folder, exist_ok=True)  # DHA: For intermediate images
+    while pred < threshold and reg_n < reg_n_max:
 
         # 3. Start reverse process loop
         for t in tqdm(timesteps[-zs.shape[0] :], desc=f"Regression run {reg_n}"):
@@ -495,18 +496,23 @@ def inversion_reverse_process_grad_guided(
             if controller is not None:
                 xt = controller.step_callback(xt)  # DHA: By default just identity?
 
-        xt_decoded = decode_latents(model, xt)
+        pdb.set_trace()  # TODO: Remove this
+        xt_decoded = decode_latents(
+            model, xt, mixed_precision=False
+        )  # TODO: Maybe check the graph for xt. Why is there no grad?
         xt_decoded.requires_grad_()
-        end_pred: torch.Tensor = predictor(xt_decoded)
+        end_pred: torch.Tensor = predictor(project_x_to_normal_space(xt_decoded))
         print("Predictor value after denoising: ", end_pred.item())
         save_intermediate_img(
-            intermediate_folder + f"reg_{reg_n}_{end_pred.item():.4f}", xt_decoded
+            intermediate_folder + f"reg_{reg_n}_{end_pred.item():.4f}.png", xt_decoded
         )
         end_pred.backward(inputs=grad_params)
 
         # Regression Gradients
         # end_pred.backward()  # DHA: somehow use this instead?
-        print(f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item())
+        print(
+            f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item()
+        )  # TODO: grad is zero here.
         optimizer.step()
         optimizer.zero_grad()
 

@@ -9,11 +9,11 @@ from torch import nn
 def decode_latents(
     model: StableDiffusionPipeline, w0, mixed_precision=True
 ) -> torch.Tensor:
-    if mixed_precision:
-        with autocast("cuda"):
-            x0_decoded = model.vae.decode(1 / 0.18215 * w0).sample
-    else:
-        x0_decoded = model.vae.decode(1 / 0.18215 * w0).sample
+    # if mixed_precision:
+    #     with autocast("cuda"):
+    #         x0_decoded = model.vae.decode(1 / 0.18215 * w0).sample
+    # else:
+    x0_decoded = model.vae.decode(1 / 0.18215 * w0).sample
     return x0_decoded
 
 

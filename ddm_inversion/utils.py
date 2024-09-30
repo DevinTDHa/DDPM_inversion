@@ -5,6 +5,8 @@ import torchvision.transforms as T
 import os
 import torch
 import yaml
+import sys
+import pdb
 
 
 def show_torch_img(img):
@@ -134,10 +136,23 @@ def save_intermediate_img(path, tensor_img):
     if len(tensor_img.shape) == 4:
         tensor_img = tensor_img[0]  # Assume only one image
 
-    # tensor_img = project_x_to_normal_space(tensor_img)
-
-    to_pil = T.ToPILImage()
-    pil_img = to_pil(tensor_img.cpu().detach().clamp(0, 1))
+    pil_img = tensor_to_pil(tensor_img)[0]
 
     # Save the image
     pil_img.save(path)
+
+
+def setup_pdb_exception_hook():
+    import sys
+
+    def pdb_exception_hook(type, value, tb):
+        if not sys.stderr.isatty():  # Check if we are in a terminal
+            sys.__excepthook__(type, value, tb)  # Call default hook
+        else:
+            import traceback
+
+            traceback.print_exception(type, value, tb)  # Print exception details
+            print()
+            pdb.post_mortem(tb)  # Enter post-mortem debugging
+
+    sys.excepthook = pdb_exception_hook  # Set the custom exception hook

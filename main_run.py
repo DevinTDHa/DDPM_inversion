@@ -20,13 +20,14 @@ from ddm_inversion.inversion_utils import (
     inversion_reverse_process,
     inversion_reverse_process_grad_guided,
 )
-from ddm_inversion.utils import image_grid, dataset_from_yaml
+from ddm_inversion.utils import image_grid, dataset_from_yaml, setup_pdb_exception_hook
 
 from torch import autocast, inference_mode
 from ddm_inversion.ddim_inversion import ddim_inversion
 
 import calendar
 import time
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -35,7 +36,9 @@ if __name__ == "__main__":
     parser.add_argument("--cfg_tar", type=float, default=15)
     parser.add_argument("--num_diffusion_steps", type=int, default=100)
     parser.add_argument("--dataset_yaml", default="test.yaml")
-    parser.add_argument("--eta", type=float, default=1, help="eta to move between DDPM and DDIM")
+    parser.add_argument(
+        "--eta", type=float, default=1, help="eta to move between DDPM and DDIM"
+    )
     parser.add_argument(
         "--mode", default="our_inv", help="modes: our_inv,p2pinv,p2pddim,ddim"
     )
@@ -45,6 +48,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     full_data = dataset_from_yaml(args.dataset_yaml)
+
+    setup_pdb_exception_hook()
 
     # create scheduler
     # load diffusion model
