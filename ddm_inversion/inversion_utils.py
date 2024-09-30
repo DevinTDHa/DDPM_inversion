@@ -2,6 +2,7 @@ from typing import Optional
 import torch
 import os
 from tqdm import tqdm
+from ddm_inversion.models import decode_latents
 from ddm_inversion.utils import (
     pil_to_tensor,
     save_intermediate_img,
@@ -445,8 +446,8 @@ def inversion_reverse_process_grad_guided(
     optimizer = torch.optim.Adam(grad_params, lr=0.005, maximize=True)
 
     pred = predictor(
-        project_x_to_normal_space(x0)
-    )  # DHA: x0 value range is -1 to 1 due to diffusion model
+        decode_latents(model, xt)
+    )
 
     print("Initial predictor value before denoising: ", pred.item())
     reg_n = 0
@@ -491,14 +492,16 @@ def inversion_reverse_process_grad_guided(
             noise_pred = uncond_out.sample
             # 3.2 compute less noisy image and set x_t -> x_t-1
             xt = reverse_step(model, noise_pred, t, xt, eta=etas[idx], variance_noise=z)
-            save_intermediate_img(intermediate_folder + f"t_{t.item():04d}.png", xt)
             if controller is not None:
                 xt = controller.step_callback(xt)  # DHA: By default just identity?
 
-        xt.requires_grad_()
-        # TODO: Decode for final image actually
-        end_pred: torch.Tensor = predictor(project_x_to_normal_space(xt))
+        xt_decoded = decode_latents(model, xt)
+        xt_decoded.requires_grad_()
+        end_pred: torch.Tensor = predictor(xt_decoded)
         print("Predictor value after denoising: ", end_pred.item())
+        save_intermediate_img(
+            intermediate_folder + f"reg_{reg_n}_{end_pred.item():.4f}", xt_decoded
+        )
         end_pred.backward(inputs=grad_params)
 
         # Regression Gradients
