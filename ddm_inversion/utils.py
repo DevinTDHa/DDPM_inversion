@@ -132,14 +132,12 @@ def project_x_to_normal_space(x):
 
 
 def save_intermediate_img(path, tensor_img):
-    # Convert tensor to PIL image
-    if len(tensor_img.shape) == 4:
-        tensor_img = tensor_img[0]  # Assume only one image
-
-    pil_img = tensor_to_pil(tensor_img)[0]
+    # Convert tensor to PIL image, assume only one image
+    pil_imgs = tensor_to_pil(tensor_img)
+    assert len(pil_imgs) == 1
 
     # Save the image
-    pil_img.save(path)
+    pil_imgs[0].save(path)
 
 
 def setup_pdb_exception_hook():

@@ -431,18 +431,11 @@ def inversion_reverse_process_grad_guided(
 
     grads_for = "zs"
     grad_params = []
-    if grads_for == "xt":
-        # Enable Grads for xt
-        xt.requires_grad_()
-        grad_params.append(xt)
-    elif grads_for == "zs":
-        # Enable Grads for z
-        # DHA: maybe do this iteratively in the loop? keep denoising and adjusting zs until the predictor value changes?
-        zs_orig = zs.detach().clone()
-        zs.requires_grad_()  # DHA: where do we need to start to collect grads?
-        grad_params.append(zs)
-    else:
-        raise ValueError("Invalid grads_for value")
+    # Enable Grads for z
+    # DHA: maybe do this iteratively in the loop? keep denoising and adjusting zs until the predictor value changes?
+    zs_orig = zs.detach().clone()
+    zs.requires_grad_()  # DHA: where do we need to start to collect grads?
+    grad_params.append(zs)
 
     optimizer = torch.optim.Adam(grad_params, lr=0.005, maximize=True)
 
@@ -450,7 +443,7 @@ def inversion_reverse_process_grad_guided(
     pred = predictor(project_x_to_normal_space(xt_decoded))
 
     print("Initial predictor value before denoising: ", pred.item())
-    intermediate_folder = os.path.join(f"imgs/intermediate/reg_", str(pred.item()))
+    intermediate_folder = f"imgs/intermediate/reg_" + str(pred.item())
     os.makedirs(intermediate_folder, exist_ok=True)  # DHA: For intermediate images
 
     reg_n = 0
@@ -458,6 +451,8 @@ def inversion_reverse_process_grad_guided(
     threshold = 0.9  # TODO
 
     while pred < threshold and reg_n < reg_n_max:
+        # Reset xt
+        xt = init_xt()
 
         # 3. Start reverse process loop
         for t in tqdm(timesteps[-zs.shape[0] :], desc=f"Regression run {reg_n}"):
@@ -496,28 +491,25 @@ def inversion_reverse_process_grad_guided(
             if controller is not None:
                 xt = controller.step_callback(xt)  # DHA: By default just identity?
 
-        pdb.set_trace()  # TODO: Remove this
         xt_decoded = decode_latents(
             model, xt, mixed_precision=False
-        )  # TODO: Maybe check the graph for xt. Why is there no grad?
-        xt_decoded.requires_grad_()
-        end_pred: torch.Tensor = predictor(project_x_to_normal_space(xt_decoded))
-        print("Predictor value after denoising: ", end_pred.item())
-        save_intermediate_img(
-            intermediate_folder + f"reg_{reg_n}_{end_pred.item():.4f}.png", xt_decoded
         )
-        end_pred.backward(inputs=grad_params)
+        xt_decoded.requires_grad_()
+        pred: torch.Tensor = predictor(project_x_to_normal_space(xt_decoded))
+        print("Predictor value after denoising: ", pred.item())
+        save_intermediate_img(
+            intermediate_folder + f"/reg_{reg_n}_{pred.item():.4f}.png", xt_decoded
+        )
+        pred.backward(inputs=grad_params)
 
         # Regression Gradients
         # end_pred.backward()  # DHA: somehow use this instead?
         print(
             f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item()
-        )  # TODO: grad is zero here.
+        )
         optimizer.step()
         optimizer.zero_grad()
 
-        # Reset xt
-        xt = init_xt()
         reg_n += 1
 
     # Edit
