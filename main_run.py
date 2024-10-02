@@ -163,6 +163,7 @@ if __name__ == "__main__":
                             etas=eta,
                             cfg_scales=[cfg_scale_tar],
                             controller=controller,
+                            time_stamp=time_stamp,
                         )
 
                     # elif args.mode == "p2pinv":

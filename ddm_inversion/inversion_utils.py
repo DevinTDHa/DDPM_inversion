@@ -394,6 +394,15 @@ def inversion_reverse_process(
     return xt, zs
 
 
+def regr_loss_fn(x, x_counterf, y, y_hat, lambd=1.0):
+    """
+    Compute the regression loss function. Uses the formulation by (Wachter 2017).
+    """
+    return lambd * torch.nn.functional.mse_loss(
+        y, y_hat
+    ) + torch.nn.functional.mse_loss(x, x_counterf)
+
+
 def inversion_reverse_process_grad_guided(
     model,
     x0: torch.Tensor,
@@ -403,6 +412,7 @@ def inversion_reverse_process_grad_guided(
     etas: int = 0,
     cfg_scales=None,
     controller: Optional[AttentionStore] = None,
+    time_stamp: str = "",
 ):
     assert predictor, "A predictor module is required for grad guided inversion"
 
@@ -437,18 +447,20 @@ def inversion_reverse_process_grad_guided(
     zs.requires_grad_()  # DHA: where do we need to start to collect grads?
     grad_params.append(zs)
 
-    optimizer = torch.optim.Adam(grad_params, lr=0.005, maximize=True)
+    optimizer = torch.optim.Adam(grad_params, lr=0.005)
 
     xt_decoded = decode_latents(model, xt)
     pred = predictor(project_x_to_normal_space(xt_decoded))
 
     print("Initial predictor value before denoising: ", pred.item())
-    intermediate_folder = f"imgs/intermediate/reg_" + str(pred.item())
+    intermediate_folder = f"imgs/intermediate/reg{time_stamp}_" + str(pred.item())
     os.makedirs(intermediate_folder, exist_ok=True)  # DHA: For intermediate images
 
     reg_n = 0
     reg_n_max = 10
     threshold = 0.9  # TODO
+    target = 1.0
+    y = torch.Tensor([target]).to(x0.device)
 
     while pred < threshold and reg_n < reg_n_max:
         # Reset xt
@@ -491,22 +503,20 @@ def inversion_reverse_process_grad_guided(
             if controller is not None:
                 xt = controller.step_callback(xt)  # DHA: By default just identity?
 
-        xt_decoded = decode_latents(
-            model, xt, mixed_precision=False
-        )
+        # Prepare Gradients
+        xt_decoded = decode_latents(model, xt, mixed_precision=False)
         xt_decoded.requires_grad_()
         pred: torch.Tensor = predictor(project_x_to_normal_space(xt_decoded))
         print("Predictor value after denoising: ", pred.item())
         save_intermediate_img(
-            intermediate_folder + f"/reg_{reg_n}_{pred.item():.4f}.png", xt_decoded
+            intermediate_folder + f"/reg_{reg_n}_{pred.item():.4f}.png",
+            xt_decoded,
         )
-        pred.backward(inputs=grad_params)
+        loss = regr_loss_fn(x0, xt_decoded, y, pred)
+        loss.backward(inputs=grad_params)
 
-        # Regression Gradients
-        # end_pred.backward()  # DHA: somehow use this instead?
-        print(
-            f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item()
-        )
+        # 4. Optimize zs
+        print(f"t: {t.item()}; Grad Magnitudes: ", zs.grad.abs().sum().item())
         optimizer.step()
         optimizer.zero_grad()
 
